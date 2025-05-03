@@ -1,21 +1,31 @@
 import {
   ApolloLink,
-  Observable,
-  Operation,
-  NextLink,
   FetchResult,
   fromPromise,
-} from '@apollo/client/core';
+  NextLink,
+  Observable,
+  Operation,
+} from "@apollo/client/core";
 
-import { OperationQueuing } from './queuing';
+import { BroadcastChannelService } from "./broadcastChannelService";
+import { OperationQueuing } from "./queuing";
 
-export { OperationQueuing, QueuedRequest } from './queuing';
+export { OperationQueuing, QueuedRequest } from "./queuing";
 
 export type FetchAccessToken = (...args: any[]) => Promise<Response>;
-export type HandleFetch<AccessTokenPayloadType> = (accessTokenPayload: AccessTokenPayloadType, operation: Operation) => void;
-export type HandleResponse = (operation: Operation, accessTokenField: string) => any;
+export type HandleFetch<AccessTokenPayloadType> = (
+  accessTokenPayload: AccessTokenPayloadType,
+  operation: Operation
+) => void;
+export type HandleResponse = (
+  operation: Operation,
+  accessTokenField: string
+) => any;
 export type HandleError = (err: Error, operation: Operation) => void;
-export type IsTokenValidOrUndefined = (operation: Operation, ...args: any[]) => Promise<boolean>;
+export type IsTokenValidOrUndefined = (
+  operation: Operation,
+  ...args: any[]
+) => Promise<boolean>;
 
 // Used for any Error for data from the server
 // on a request with a Status >= 300
@@ -43,51 +53,53 @@ const throwServerError = (response, result, message) => {
   throw error;
 };
 
-const parseAndCheckResponse = (operation: Operation, accessTokenField: string) => (response: Response) => {
-  return response
-    .text()
-    .then(bodyText => {
-      if (typeof bodyText !== 'string' || !bodyText.length) {
-        // return empty body immediately
-        return bodyText || '';
-      }
+const parseAndCheckResponse =
+  (operation: Operation, accessTokenField: string) => (response: Response) => {
+    return response
+      .text()
+      .then((bodyText) => {
+        if (typeof bodyText !== "string" || !bodyText.length) {
+          // return empty body immediately
+          return bodyText || "";
+        }
 
-      try {
-        return JSON.parse(bodyText);
-      } catch (err) {
-        const parseError = err as ServerParseError;
-        parseError.response = response;
-        parseError.statusCode = response.status;
-        parseError.bodyText = bodyText;
-        return Promise.reject(parseError);
-      }
-    })
-    .then(parsedBody => {
-      if (response.status >= 300) {
-        // Network error
-        throwServerError(
-          response,
-          parsedBody,
-          `Response not successful: Received status code ${response.status}`,
-        );
-      }
-      // token can be delivered via apollo query (body.data) or as usual
-      if (
-        !parsedBody.hasOwnProperty(accessTokenField)
-        && (parsedBody.data && !parsedBody.data.hasOwnProperty(accessTokenField))
-        && !parsedBody.hasOwnProperty('errors')
-      ) {
-        // Data error
-        throwServerError(
-          response,
-          parsedBody,
-          `Server response was missing for query '${operation.operationName}'.`,
-        );
-      }
+        try {
+          return JSON.parse(bodyText);
+        } catch (err) {
+          const parseError = err as ServerParseError;
+          parseError.response = response;
+          parseError.statusCode = response.status;
+          parseError.bodyText = bodyText;
+          return Promise.reject(parseError);
+        }
+      })
+      .then((parsedBody) => {
+        if (response.status >= 300) {
+          // Network error
+          throwServerError(
+            response,
+            parsedBody,
+            `Response not successful: Received status code ${response.status}`
+          );
+        }
+        // token can be delivered via apollo query (body.data) or as usual
+        if (
+          !parsedBody.hasOwnProperty(accessTokenField) &&
+          parsedBody.data &&
+          !parsedBody.data.hasOwnProperty(accessTokenField) &&
+          !parsedBody.hasOwnProperty("errors")
+        ) {
+          // Data error
+          throwServerError(
+            response,
+            parsedBody,
+            `Server response was missing for query '${operation.operationName}'.`
+          );
+        }
 
-      return parsedBody;
-    });
-};
+        return parsedBody;
+      });
+  };
 
 export namespace TokenRefreshLink {
   export interface Options<AccessTokenPayloadType> {
@@ -127,8 +139,9 @@ export namespace TokenRefreshLink {
   }
 }
 
-
-export class TokenRefreshLink<AccessTokenPayloadType = string> extends ApolloLink {
+export class MultiTabTokenRefreshLink<
+  AccessTokenPayloadType = string
+> extends ApolloLink {
   private accessTokenField: string;
   private isTokenValidOrUndefined: IsTokenValidOrUndefined;
   private fetchAccessToken: FetchAccessToken;
@@ -137,72 +150,108 @@ export class TokenRefreshLink<AccessTokenPayloadType = string> extends ApolloLin
   private handleError: HandleError;
   private fetching: boolean;
   private queue: OperationQueuing;
+  private broadcastService: BroadcastChannelService;
 
   constructor(params: TokenRefreshLink.Options<AccessTokenPayloadType>) {
     super();
 
-    this.accessTokenField = params.accessTokenField || 'access_token';
+    this.accessTokenField = params.accessTokenField || "access_token";
     this.isTokenValidOrUndefined = params.isTokenValidOrUndefined;
     this.fetchAccessToken = params.fetchAccessToken;
     this.handleFetch = params.handleFetch;
     this.handleResponse = params.handleResponse || parseAndCheckResponse;
-    this.handleError = typeof params.handleError === 'function'
-      ? params.handleError
-      : err => {
-        console.error(err)
-      };
+    this.handleError =
+      typeof params.handleError === "function"
+        ? params.handleError
+        : (err) => {
+            console.error(err);
+          };
 
     this.fetching = false;
     this.queue = new OperationQueuing();
+    this.broadcastService = BroadcastChannelService.getInstance();
+
+    this.broadcastService.addListener((event) => {
+      if (event.data.type === "token-refreshed") {
+        this.handleFetch(event.data.payload, {} as Operation);
+        this.fetching = false;
+        this.queue.consumeQueue();
+        return;
+      }
+
+      if (event.data.type === "token-refresh-started") {
+        this.fetching = true;
+        return;
+      }
+
+      if (event.data.type === "token-refresh-failed") {
+        this.fetching = false;
+        this.queue.consumeQueue(new Error("Token refresh failed"));
+        return;
+      }
+    });
   }
 
   public request(
     operation: Operation,
-    forward: NextLink,
+    forward: NextLink
   ): Observable<FetchResult> | null {
-    if (typeof forward !== 'function') {
-      throw new Error('[Token Refresh Link]: Token Refresh Link is a non-terminating link and should not be the last in the composed chain');
+    if (typeof forward !== "function") {
+      throw new Error(
+        "[Token Refresh Link]: Token Refresh Link is a non-terminating link and should not be the last in the composed chain"
+      );
     }
 
     return fromPromise(
       this.isTokenValidOrUndefined(operation).then((tokenValidOrUndefined) => {
-        // If token does not exist, which could mean that this is a not registered
-        // user request, or if it is not expired -- act as always
-        if (tokenValidOrUndefined) {
-          return forward(operation);
-        } else {
-          if (!this.fetching) {
-            this.fetching = true;
-            this.fetchAccessToken()
-              .then(this.handleResponse(operation, this.accessTokenField))
-              .then((body) => {
-                const token = this.extractToken(body);
-                if (!token) {
-                  throw new Error(
-                    "[Token Refresh Link]: Unable to retrieve new access token"
-                  );
-                }
-                return token;
-              })
-              .then((payload) => {
-                this.handleFetch(payload, operation);
-                this.fetching = false;
-                this.queue.consumeQueue();
-              })
-              .catch((error) => {
-                this.handleError(error, operation);
-                this.fetching = false;
-                this.queue.consumeQueue(error);
-              })
-          }
+        if (tokenValidOrUndefined) return forward(operation);
 
-          return this.queue.enqueueRequest({
-            operation,
-            forward,
+        if (!this.fetching) {
+          this.fetching = true;
+          this.broadcastService.postMessage({ type: "token-refresh-started" });
+
+          // Use Web Locks API to ensure only one tab performs the refresh
+          navigator.locks.request("token-refresh-lock", async () => {
+            try {
+              const response = await this.fetchAccessToken();
+              const body = await this.handleResponse(
+                operation,
+                this.accessTokenField
+              )(response);
+              const token = this.extractToken(body);
+
+              if (!token) {
+                throw new Error(
+                  "[Token Refresh Link]: Unable to retrieve new access token"
+                );
+              }
+
+              this.broadcastService.postMessage({
+                type: "token-refreshed",
+                payload: token,
+              });
+
+              this.handleFetch(token, operation);
+              this.fetching = false;
+              this.queue.consumeQueue();
+            } catch (error) {
+              this.broadcastService.postMessage({
+                type: "token-refresh-failed",
+              });
+
+              this.handleError(error, operation);
+              this.fetching = false;
+              this.queue.consumeQueue(error);
+            }
           });
         }
+
+        return this.queue.enqueueRequest({
+          operation,
+          forward,
+        });
       })
-    ).flatMap(val => val)
+    ).flatMap((val) => val);
   }
 
   /**
