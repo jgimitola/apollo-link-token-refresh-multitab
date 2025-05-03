@@ -207,11 +207,14 @@ export class MultiTabTokenRefreshLink<
         if (tokenValidOrUndefined) return forward(operation);
 
         if (!this.fetching) {
-          this.fetching = true;
-          this.broadcastService.postMessage({ type: "token-refresh-started" });
-
           // Use Web Locks API to ensure only one tab performs the refresh
           navigator.locks.request("token-refresh-lock", async () => {
+            this.fetching = true;
+            
+            this.broadcastService.postMessage({
+              type: "token-refresh-started",
+            });
+
             try {
               const response = await this.fetchAccessToken();
               const body = await this.handleResponse(
