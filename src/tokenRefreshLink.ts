@@ -208,45 +208,57 @@ export class MultiTabTokenRefreshLink<
 
         if (!this.fetching) {
           // Use Web Locks API to ensure only one tab performs the refresh
-          navigator.locks.request("token-refresh-lock", async () => {
-            this.fetching = true;
-            
-            this.broadcastService.postMessage({
-              type: "token-refresh-started",
-            });
-
-            try {
-              const response = await this.fetchAccessToken();
-              const body = await this.handleResponse(
-                operation,
-                this.accessTokenField
-              )(response);
-              const token = this.extractToken(body);
-
-              if (!token) {
-                throw new Error(
-                  "[Token Refresh Link]: Unable to retrieve new access token"
+          navigator.locks.request(
+            "token-refresh-lock",
+            { ifAvailable: true },
+            async (lock) => {
+              if (!lock) {
+                console.log(
+                  "[Token Refresh Link]: Token refresh already in progress"
                 );
+
+                return;
               }
 
+              this.fetching = true;
+
               this.broadcastService.postMessage({
-                type: "token-refreshed",
-                payload: token,
+                type: "token-refresh-started",
               });
 
-              this.handleFetch(token, operation);
-              this.fetching = false;
-              this.queue.consumeQueue();
-            } catch (error) {
-              this.broadcastService.postMessage({
-                type: "token-refresh-failed",
-              });
+              try {
+                const response = await this.fetchAccessToken();
+                const body = await this.handleResponse(
+                  operation,
+                  this.accessTokenField
+                )(response);
+                const token = this.extractToken(body);
 
-              this.handleError(error, operation);
-              this.fetching = false;
-              this.queue.consumeQueue(error);
+                if (!token) {
+                  throw new Error(
+                    "[Token Refresh Link]: Unable to retrieve new access token"
+                  );
+                }
+
+                this.broadcastService.postMessage({
+                  type: "token-refreshed",
+                  payload: token,
+                });
+
+                this.handleFetch(token, operation);
+                this.fetching = false;
+                this.queue.consumeQueue();
+              } catch (error) {
+                this.broadcastService.postMessage({
+                  type: "token-refresh-failed",
+                });
+
+                this.handleError(error, operation);
+                this.fetching = false;
+                this.queue.consumeQueue(error);
+              }
             }
-          });
+          );
         }
 
         return this.queue.enqueueRequest({
